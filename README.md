@@ -65,7 +65,7 @@ POST /api/recipes/{id}/submit       发布校验（合计 100%）
 GET  /api/recipes/stats/species     按畜种统计配方数与成本
 GET  /api/batches                   批次列表
 GET  /api/batches/{id}              批次详情（@SortComparator 有序投料明细）
-POST /api/batches/{id}/feeding      开始称量 / 确认投料
+POST /api/batches/{id}/feeding      开始称量 / 放弃称量 / 确认投料
 GET  /api/batches/stats/feed-error  按批次统计投料误差率
 GET  /api/pellets                   制粒记录（按环模磨损倒序）
 POST /api/pellets/batch/{id}/adjust 工艺参数调整 + 推荐寿命消耗

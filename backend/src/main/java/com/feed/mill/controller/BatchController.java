@@ -43,12 +43,17 @@ public class BatchController {
         return ApiResponse.success(batchService.detail(id));
     }
 
-    /** 开始称量 / 确认投料 */
+    /** 开始称量 / 放弃称量 / 确认投料 */
     @PostMapping("/{id}/feeding")
     public ApiResponse<Batch> feed(@PathVariable Long id, @Valid @RequestBody FeedingCommand command) {
         Batch batch = batchService.feed(id, command);
-        return ApiResponse.success("CONFIRM".equalsIgnoreCase(command.getAction())
-                ? "投料已确认并计入批次" : "已进入称量状态", batch);
+        String action = command.getAction() == null ? "" : command.getAction().toUpperCase();
+        String message = switch (action) {
+            case "CONFIRM" -> "投料已确认并计入批次";
+            case "CANCEL" -> "称量已取消";
+            default -> "已进入称量状态";
+        };
+        return ApiResponse.success(message, batch);
     }
 
     /** 按批次统计投料误差率（手写 JPQL） */
