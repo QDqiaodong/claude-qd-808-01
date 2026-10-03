@@ -7,13 +7,13 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * 投料指令：开始称量（action=WEIGH）或确认实际投料量（action=CONFIRM）。
+ * 投料指令：开始称量（WEIGH）、取消称量（CANCEL）或确认实际投料量（CONFIRM）。
  */
 @Getter
 @Setter
 public class FeedingCommand {
 
-    /** WEIGH / CONFIRM */
+    /** WEIGH / CANCEL / CONFIRM */
     private String action;
 
     @NotNull(message = "投料顺序不能为空")

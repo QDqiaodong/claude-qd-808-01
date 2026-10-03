@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div ref="sectionEl">
     <div class="section-head">
       <h2>03 投料</h2>
       <span>投料口大按钮阵列 · 按投料顺序称量 · 环形倒计时 · 误差超 ±2% 拦截并记录异常</span>
@@ -45,13 +45,13 @@
             {{ item.abnormalNote }}
           </div>
 
-          <!-- 环形倒计时 -->
-          <svg v-if="counting[item.feedSeq]" class="ring" width="46" height="46" viewBox="0 0 46 46">
+          <!-- 环形倒计时：状态按批次 + 投料序号隔离，避免切换批次串批 -->
+          <svg v-if="isCounting(item)" class="ring" width="46" height="46" viewBox="0 0 46 46">
             <circle cx="23" cy="23" r="18" fill="none" stroke="#ffe0b2" stroke-width="4" />
             <circle cx="23" cy="23" r="18" fill="none" stroke="#ef6c00" stroke-width="4" stroke-linecap="round"
-                    :stroke-dasharray="CIRC" :stroke-dashoffset="CIRC * (1 - counting[item.feedSeq] / TOTAL)"
+                    :stroke-dasharray="CIRC" :stroke-dashoffset="CIRC * (1 - countdownLeft(item) / TOTAL)"
                     transform="rotate(-90 23 23)" />
-            <text x="23" y="27" text-anchor="middle">{{ counting[item.feedSeq] }}</text>
+            <text x="23" y="27" text-anchor="middle">{{ countdownLeft(item) }}</text>
           </svg>
         </div>
       </div>
@@ -61,8 +61,11 @@
       </div>
     </div>
 
-    <el-dialog v-model="dialog.visible" title="实际称重 → 确认投料" width="420px">
+    <el-dialog v-model="dialog.visible" :title="dialogTitle" width="420px" @close="closeDialog">
       <div v-if="dialog.item">
+        <div class="mini muted" style="margin-bottom:8px">
+          所属批次：{{ dialog.batchNo }}
+        </div>
         <div class="param-card">
           <span>{{ dialog.item.portNo }} · {{ dialog.item.material.name }}</span>
           <b>计划 {{ Number(dialog.item.plannedKg).toFixed(2) }} kg</b>
@@ -87,16 +90,17 @@
       </div>
       <template #footer>
         <el-button @click="dialog.visible = false">取消</el-button>
-        <el-button type="primary" :loading="dialog.busy" @click="confirmFeed">确认投料</el-button>
+        <el-button type="primary" :loading="dialog.busy" @click="submitFeed">确认投料</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchBatches, fetchBatch, feeding } from '../api'
+import { useFeedingCountdown } from '../composables/useFeedingCountdown'
 
 const TOTAL = 5
 const CIRC = 2 * Math.PI * 18
@@ -104,9 +108,26 @@ const CIRC = 2 * Math.PI * 18
 const batches = ref([])
 const batch = ref(null)
 const batchId = ref(null)
-const counting = ref({})
-const timers = {}
-const dialog = reactive({ visible: false, busy: false, item: null, actual: 0 })
+const sectionEl = ref(null)
+let feedingObserver = null
+
+const {
+  counting,
+  dialog,
+  dialogTitle,
+  countdownLeft,
+  isCounting,
+  startWeigh: startOwnerWeigh,
+  closeDialog,
+  clearAllCountdowns,
+  submitFeed
+} = useFeedingCountdown({
+  total: TOTAL,
+  getCurrentBatch: () => batchId.value,
+  loadBatch,
+  sendFeedingAction: feeding,
+  notify: ({ type, message }) => ElMessage[type](message)
+})
 
 const doneCount = computed(() =>
   (batch.value?.feedings || []).filter(f => f.status === 'DONE').length
@@ -123,11 +144,11 @@ function statusName (s) {
   return { PLANNED: '待排产', FEEDING: '投料中', PELLETING: '制粒中', QC: '质检中', RECHECK: '复检中', DONE: '已完成' }[s] || s
 }
 function feedStatusName (item) {
-  if (counting.value[item.feedSeq]) return '称量中'
+  if (isCounting(item)) return '称量中'
   return { PENDING: '待投', WEIGHING: '称量中', DONE: '已投', ABNORMAL: '异常' }[item.status] || item.status
 }
 function tagClass (item) {
-  if (counting.value[item.feedSeq]) return 'tag-chip chip-down'
+  if (isCounting(item)) return 'tag-chip chip-down'
   return {
     PENDING: 'tag-chip chip-gray',
     WEIGHING: 'tag-chip chip-down',
@@ -137,17 +158,17 @@ function tagClass (item) {
 }
 function portClass (item) {
   const cls = []
-  if (counting.value[item.feedSeq]) cls.push('weighing')
+  if (isCounting(item)) cls.push('weighing')
   else if (item.status === 'DONE') cls.push('done')
   else if (item.status === 'ABNORMAL') cls.push('abnormal')
   if (!operable(item)) cls.push('disabled')
-  return cls
+  return cls.join(' ')
 }
 
-/** 只有「待投」且上一道已完成、且当前没在倒计时」的投料口可操作 */
+/** 只有「待投/异常」且上一道已完成的投料口可发起新倒计时；已进入称重点可直接补开弹窗 */
 function operable (item) {
-  if (!batch.value) return false
-  if (counting.value[item.feedSeq]) return false
+  if (!batch.value || isCounting(item)) return false
+  if (item.status === 'WEIGHING') return true
   if (item.status !== 'PENDING' && item.status !== 'ABNORMAL') return false
   if (item.status === 'ABNORMAL') return true
   const prev = batch.value.feedings.find(f => f.feedSeq === item.feedSeq - 1)
@@ -160,59 +181,17 @@ async function loadBatch () {
 }
 
 async function startWeigh (item) {
-  if (!operable(item)) {
-    if (item.status === 'DONE') return
-    ElMessage.warning('请按投料口顺序依次投料')
+  if (!batch.value || !operable(item)) {
+    if (item.status !== 'DONE') ElMessage.warning('请按投料口顺序依次投料')
     return
   }
-  try {
-    await feeding(batchId.value, { action: 'WEIGH', feedSeq: item.feedSeq })
-  } catch (e) {
-    ElMessage.warning(e.message)
-  }
-  counting.value = { ...counting.value, [item.feedSeq]: TOTAL }
-  const timer = setInterval(() => {
-    const left = (counting.value[item.feedSeq] || 0) - 1
-    if (left <= 0) {
-      clearInterval(timer)
-      delete timers[item.feedSeq]
-      counting.value = { ...counting.value, [item.feedSeq]: 0 }
-      openDialog(item)
-    } else {
-      counting.value = { ...counting.value, [item.feedSeq]: left }
-    }
-  }, 1000)
-  timers[item.feedSeq] = timer
-}
-
-function openDialog (item) {
-  dialog.item = item
-  dialog.actual = Number(item.plannedKg)
-  dialog.visible = true
+  const fresh = await startOwnerWeigh(batch.value, item)
+  if (fresh) batch.value = fresh
 }
 
 function preset (rate) {
   const planned = Number(dialog.item.plannedKg)
   dialog.actual = Number((planned * (1 + rate / 100)).toFixed(2))
-}
-
-async function confirmFeed () {
-  dialog.busy = true
-  try {
-    await feeding(batchId.value, {
-      action: 'CONFIRM',
-      feedSeq: dialog.item.feedSeq,
-      actualKg: Number(dialog.actual)
-    })
-    ElMessage.success(`${dialog.item.portNo} ${dialog.item.material.name} 投料完成`)
-    dialog.visible = false
-    await loadBatch()
-  } catch (e) {
-    ElMessage.error(e.message)
-    await loadBatch()
-  } finally {
-    dialog.busy = false
-  }
 }
 
 onMounted(async () => {
@@ -223,9 +202,20 @@ onMounted(async () => {
     batchId.value = target.id
     await loadBatch()
   }
+
+  if ('IntersectionObserver' in window && sectionEl.value) {
+    feedingObserver = new IntersectionObserver(entries => {
+      const entry = entries[0]
+      if (!entry?.isIntersecting) {
+        clearAllCountdowns(true).then(loadBatch).catch(() => {})
+      }
+    }, { threshold: 0 })
+    feedingObserver.observe(sectionEl.value)
+  }
 })
 
 onBeforeUnmount(() => {
-  Object.values(timers).forEach(t => clearInterval(t))
+  feedingObserver?.disconnect()
+  clearAllCountdowns(false)
 })
 </script>

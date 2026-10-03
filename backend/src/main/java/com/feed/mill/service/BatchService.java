@@ -52,7 +52,7 @@ public class BatchService {
     }
 
     /**
-     * 投料动作：WEIGH 开始称量，CONFIRM 确认实际投料量。
+     * 投料动作：WEIGH 开始称量，CANCEL 取消称量，CONFIRM 确认实际投料量。
      */
     @Transactional
     public Batch feed(Long batchId, FeedingCommand command) {
@@ -67,6 +67,14 @@ public class BatchService {
         if ("WEIGH".equals(action)) {
             item.setStatus("WEIGHING");
             batchRepository.save(batch);
+            return batch;
+        }
+        if ("CANCEL".equals(action)) {
+            if ("WEIGHING".equals(item.getStatus())) {
+                boolean restoringAbnormal = item.getActualKg() != null || item.getAbnormalNote() != null;
+                item.setStatus(restoringAbnormal ? "ABNORMAL" : "PENDING");
+                batchRepository.save(batch);
+            }
             return batch;
         }
         if (!"CONFIRM".equals(action)) {
